@@ -1,4 +1,4 @@
-//The api client for vmm's golang SDK
+// The api client for vmm's golang SDK
 package client
 
 import (
@@ -45,24 +45,24 @@ var (
 )
 
 /*
-  API client to handle the client-server communication, and is invariant across implementations.
+API client to handle the client-server communication, and is invariant across implementations.
 
-    Scheme (optional) : URI scheme for connecting to the cluster (HTTP or HTTPS using SSL/TLS) (default : https)
-    Host (required) : Host IPV4, IPV6 or FQDN for all http request made by this client (default : localhost)
-    Port (optional) : Port for the host to connect to make all http request (default : 9440)
-    Username (required) : Username to connect to a cluster
-    Password (required) : Password to connect to a cluster
-    Debug (optional) : flag to enable debug logging (default : empty)
-    VerifySSL (optional) : Verify SSL certificate of cluster (default: true)
-    MaxRetryAttempts (optional) : Maximum number of retry attempts to be made at a time (default: 5)
-    MaxRedirects (optional) : Maximum number of redirect attempts to be made at a time (default: 10)
-    ReadTimeout (optional) : Read timeout for all operations (default: 30 sec)
-    ConnectTimeout (optional) : Connection timeout for all operations (default: 30 sec)
-    RetryInterval (optional) : Interval between successive retry attempts (default: 3 sec)
-    DownloadDirectory (optional) : Directory location on local for files to download (default: Current Directory)
-    DownloadChunkSize (optional) : Chunk size in bytes for files to download (default: 8*1024 bytes)
-    LoggerFile (optional) : Log file to write activity logs
-    AllowVersionNegotiation (optional) : Flag to enable version negotiation
+	Scheme (optional) : URI scheme for connecting to the cluster (HTTP or HTTPS using SSL/TLS) (default : https)
+	Host (required) : Host IPV4, IPV6 or FQDN for all http request made by this client (default : localhost)
+	Port (optional) : Port for the host to connect to make all http request (default : 9440)
+	Username (required) : Username to connect to a cluster
+	Password (required) : Password to connect to a cluster
+	Debug (optional) : flag to enable debug logging (default : empty)
+	VerifySSL (optional) : Verify SSL certificate of cluster (default: true)
+	MaxRetryAttempts (optional) : Maximum number of retry attempts to be made at a time (default: 5)
+	MaxRedirects (optional) : Maximum number of redirect attempts to be made at a time (default: 10)
+	ReadTimeout (optional) : Read timeout for all operations (default: 30 sec)
+	ConnectTimeout (optional) : Connection timeout for all operations (default: 30 sec)
+	RetryInterval (optional) : Interval between successive retry attempts (default: 3 sec)
+	DownloadDirectory (optional) : Directory location on local for files to download (default: Current Directory)
+	DownloadChunkSize (optional) : Chunk size in bytes for files to download (default: 8*1024 bytes)
+	LoggerFile (optional) : Log file to write activity logs
+	AllowVersionNegotiation (optional) : Flag to enable version negotiation
 */
 type ApiClient struct {
 	Scheme                  string `json:"scheme,omitempty"`
@@ -94,6 +94,7 @@ type ApiClient struct {
 	previousAuth            string
 	basicAuth               *BasicAuth
 	logger                  *logrus.Logger
+	logOutput               io.Writer
 
 	// maxIdleConns controls the maximum number of idle (keep-alive)
 	// connections across all hosts. Zero means no limit.
@@ -441,6 +442,14 @@ func (a *ApiClient) GetNegotiatedVersion() string {
 	return a.negotiatedVersion
 }
 
+// SetLogOutput redirects SDK logs to output. Passing nil restores the default
+// stderr and LoggerFile behavior. Call this method before using the client
+// concurrently.
+func (a *ApiClient) SetLogOutput(output io.Writer) {
+	a.logOutput = output
+	configureLogger(a)
+}
+
 // Helper method to set username for the first HTTP basic authentication.
 func (a *ApiClient) SetUserName(username string) {
 	credsChanged := a.Username != username
@@ -701,7 +710,9 @@ func configureLogger(a *ApiClient) {
 	}
 
 	var output io.Writer
-	if a.LoggerFile == "" {
+	if a.logOutput != nil {
+		output = a.logOutput
+	} else if a.LoggerFile == "" {
 		output = os.Stderr
 	} else {
 		f, _ := os.OpenFile(a.LoggerFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0777)
@@ -1237,13 +1248,13 @@ type BasicAuth struct {
 }
 
 /*
-  Configuration for the Proxy Server that requests are to be routed through.
+Configuration for the Proxy Server that requests are to be routed through.
 
-    Scheme: URI Scheme for connecting to the proxy ("http", "https" or "socks5")
-    Host: Host of the proxy to which the client will connect to
-    Port: Port of the proxy to which the client will connect to
-    Username: Username to connect to the proxy
-    Password: Password to connect to the proxy
+	Scheme: URI Scheme for connecting to the proxy ("http", "https" or "socks5")
+	Host: Host of the proxy to which the client will connect to
+	Port: Port of the proxy to which the client will connect to
+	Username: Username to connect to the proxy
+	Password: Password to connect to the proxy
 */
 type Proxy struct {
 	Username string `json:"username,omitempty"`
