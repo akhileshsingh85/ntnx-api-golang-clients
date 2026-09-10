@@ -1030,8 +1030,19 @@ func (a *ApiClient) NegotiateVersion(authNames []string) {
 			a.negotiationCompleted = false
 			return
 		}
+		responseBody, ok := response.([]byte)
+		if !ok {
+			if httpResponse, isHTTPResponse := response.(*http.Response); isHTTPResponse {
+				a.logger.Errorf("Could not fetch supported versions from server: received %s", httpResponse.Status)
+			} else {
+				a.logger.Errorf("Could not fetch supported versions from server: received unexpected response type %T", response)
+			}
+			a.negotiatedVersion = ""
+			a.negotiationCompleted = true
+			return
+		}
 		unmarshalledResp := make(map[string]interface{})
-		err = json.Unmarshal(response.([]byte), &unmarshalledResp)
+		err = json.Unmarshal(responseBody, &unmarshalledResp)
 		if nil == err {
 			if data, ok1 := unmarshalledResp["data"].(string); ok1 {
 				minimumSupportedVersion := "v4.0"
