@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -95,6 +96,7 @@ type ApiClient struct {
 	basicAuth               *BasicAuth
 	logger                  *logrus.Logger
 	logOutput               io.Writer
+	requestMu               sync.Mutex
 
 	// maxIdleConns controls the maximum number of idle (keep-alive)
 	// connections across all hosts. Zero means no limit.
@@ -197,8 +199,12 @@ func (a *ApiClient) CallApi(uri *string, httpMethod string, body interface{},
 func (a *ApiClient) CallApiWithContext(ctx context.Context, uri *string, httpMethod string, body interface{},
 	queryParams url.Values, headerParams map[string]string, formParams url.Values,
 	accepts []string, contentType []string, authNames []string) (interface{}, error) {
+	// The generated request path mutates shared authentication and transport state.
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
+
 	if a.AllowVersionNegotiation && !a.negotiationCompleted {
-		a.NegotiateVersion(authNames)
+		a.negotiateVersion(authNames)
 	}
 	return a.callApiInternal(ctx, uri, httpMethod, body, queryParams, headerParams,
 		formParams, accepts, contentType, authNames)
@@ -359,6 +365,19 @@ func (a *ApiClient) callApiInternal(ctx context.Context, uri *string, httpMethod
 		return &EmptyResponse{}, nil
 	}
 
+	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
+		responseBody, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			a.logger.Error(readErr.Error())
+			return nil, readErr
+		}
+		return nil, GenericOpenAPIError{
+			Body:   responseBody,
+			Status: response.Status,
+		}
+	}
+
 	if isBinaryResponse || isTextResponse {
 		return response, nil
 	}
@@ -371,15 +390,8 @@ func (a *ApiClient) callApiInternal(ctx context.Context, uri *string, httpMethod
 	response.Body.Close()
 	response.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 
-	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
-		return nil, GenericOpenAPIError{
-			Body:   responseBody,
-			Status: response.Status,
-		}
-	} else {
-		responseBody := addEtagReferenceToResponse(response.Header, responseBody)
-		return responseBody, nil
-	}
+	responseBody = addEtagReferenceToResponse(response.Header, responseBody)
+	return responseBody, nil
 }
 
 func (a *ApiClient) Contains(source []string, match string) bool {
@@ -1019,6 +1031,12 @@ func (a *ApiClient) getVersionDetails(version string) map[string]string {
 
 // Trigger OPTIONS API call and version negotiation manually
 func (a *ApiClient) NegotiateVersion(authNames []string) {
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
+	a.negotiateVersion(authNames)
+}
+
+func (a *ApiClient) negotiateVersion(authNames []string) {
 	path := new(string)
 	*path = "/api/prism/unversioned/info"
 	response, err := a.callApiInternal(context.Background(), path, http.MethodOptions, nil, url.Values{}, make(map[string]string),
@@ -1030,8 +1048,19 @@ func (a *ApiClient) NegotiateVersion(authNames []string) {
 			a.negotiationCompleted = false
 			return
 		}
+		responseBody, ok := response.([]byte)
+		if !ok {
+			if httpResponse, isHTTPResponse := response.(*http.Response); isHTTPResponse {
+				a.logger.Errorf("Could not fetch supported versions from server: received %s", httpResponse.Status)
+			} else {
+				a.logger.Errorf("Could not fetch supported versions from server: received unexpected response type %T", response)
+			}
+			a.negotiatedVersion = ""
+			a.negotiationCompleted = true
+			return
+		}
 		unmarshalledResp := make(map[string]interface{})
-		err = json.Unmarshal(response.([]byte), &unmarshalledResp)
+		err = json.Unmarshal(responseBody, &unmarshalledResp)
 		if nil == err {
 			if data, ok1 := unmarshalledResp["data"].(string); ok1 {
 				minimumSupportedVersion := "v4.2"
@@ -1061,7 +1090,7 @@ func (a *ApiClient) NegotiateVersion(authNames []string) {
 	} else {
 		a.logger.Errorf("Could not fetch supported versions from server with error : %s", err)
 		a.negotiatedVersion = ""
-		a.negotiationCompleted = false
+		a.negotiationCompleted = true
 	}
 }
 

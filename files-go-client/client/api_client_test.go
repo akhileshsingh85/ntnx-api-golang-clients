@@ -3,7 +3,12 @@ package client
 import (
 	"bytes"
 	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -41,5 +46,30 @@ func TestSetLogOutputNilRestoresDefault(t *testing.T) {
 	}
 	if apiClient.logger.Out != os.Stderr {
 		t.Fatalf("expected default stderr output, got %T", apiClient.logger.Out)
+	}
+}
+
+func TestCallApiReturnsErrorForTextResponse(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	defer server.Close()
+
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apiClient := NewApiClient()
+	apiClient.Scheme = "http"
+	apiClient.Host = host
+	apiClient.Port = port
+	apiClient.SetLogOutput(io.Discard)
+	path := "/missing"
+	_, err = apiClient.CallApi(&path, http.MethodGet, nil, url.Values{}, map[string]string{}, url.Values{}, nil, nil, nil)
+	if err == nil {
+		t.Fatal("expected a non-2xx text response to return an error")
 	}
 }
