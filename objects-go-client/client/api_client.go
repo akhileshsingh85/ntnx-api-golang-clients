@@ -359,6 +359,19 @@ func (a *ApiClient) callApiInternal(ctx context.Context, uri *string, httpMethod
 		return &EmptyResponse{}, nil
 	}
 
+	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
+		responseBody, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			a.logger.Error(readErr.Error())
+			return nil, readErr
+		}
+		return nil, GenericOpenAPIError{
+			Body:   responseBody,
+			Status: response.Status,
+		}
+	}
+
 	if isBinaryResponse || isTextResponse {
 		return response, nil
 	}
@@ -371,15 +384,8 @@ func (a *ApiClient) callApiInternal(ctx context.Context, uri *string, httpMethod
 	response.Body.Close()
 	response.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 
-	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
-		return nil, GenericOpenAPIError{
-			Body:   responseBody,
-			Status: response.Status,
-		}
-	} else {
-		responseBody := addEtagReferenceToResponse(response.Header, responseBody)
-		return responseBody, nil
-	}
+	responseBody = addEtagReferenceToResponse(response.Header, responseBody)
+	return responseBody, nil
 }
 
 func (a *ApiClient) Contains(source []string, match string) bool {
@@ -1072,7 +1078,7 @@ func (a *ApiClient) NegotiateVersion(authNames []string) {
 	} else {
 		a.logger.Errorf("Could not fetch supported versions from server with error : %s", err)
 		a.negotiatedVersion = ""
-		a.negotiationCompleted = false
+		a.negotiationCompleted = true
 	}
 }
 

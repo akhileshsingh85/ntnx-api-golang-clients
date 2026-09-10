@@ -312,7 +312,21 @@ func (a *ApiClient) CallApi(uri *string, httpMethod string, body interface{},
 	a.updateCookies(response)
 
 	if response.StatusCode == 204 {
+		response.Body.Close()
 		return nil, nil
+	}
+
+	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
+		responseBody, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			a.logger.Error(readErr.Error())
+			return nil, readErr
+		}
+		return nil, GenericOpenAPIError{
+			Body:   responseBody,
+			Status: response.Status,
+		}
 	}
 
 	if isBinaryResponse || isTextResponse {
@@ -327,15 +341,8 @@ func (a *ApiClient) CallApi(uri *string, httpMethod string, body interface{},
 	response.Body.Close()
 	response.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 
-	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
-		return nil, GenericOpenAPIError{
-			Body:   responseBody,
-			Status: response.Status,
-		}
-	} else {
-		responseBody := addEtagReferenceToResponse(response.Header, responseBody)
-		return responseBody, nil
-	}
+	responseBody = addEtagReferenceToResponse(response.Header, responseBody)
+	return responseBody, nil
 }
 
 func (a *ApiClient) Contains(source []string, match string) bool {
