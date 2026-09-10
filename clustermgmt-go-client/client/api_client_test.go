@@ -11,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -100,5 +101,52 @@ func TestCallApiReturnsErrorForTextResponse(t *testing.T) {
 	_, err = apiClient.callApiInternal(context.Background(), &path, http.MethodGet, nil, url.Values{}, map[string]string{}, url.Values{}, nil, nil, nil)
 	if err == nil {
 		t.Fatal("expected a non-2xx text response to return an error")
+	}
+}
+
+func TestCallApiWithContextIsSafeForConcurrentUse(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodOptions {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	host, portText, err := net.SplitHostPort(strings.TrimPrefix(server.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	apiClient := NewApiClient()
+	apiClient.Scheme = "http"
+	apiClient.Host = host
+	apiClient.Port = port
+	apiClient.SetLogOutput(io.Discard)
+
+	const requests = 20
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	wg.Add(requests)
+	for i := 0; i < requests; i++ {
+		go func() {
+			defer wg.Done()
+			path := "/test"
+			_, callErr := apiClient.CallApiWithContext(context.Background(), &path, http.MethodGet, nil, url.Values{}, map[string]string{}, url.Values{}, nil, nil, nil)
+			errs <- callErr
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for callErr := range errs {
+		if callErr != nil {
+			t.Error(callErr)
+		}
 	}
 }

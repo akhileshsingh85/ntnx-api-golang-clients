@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -99,6 +100,7 @@ type ApiClient struct {
 	previousClientKey     string
 	logger                *logrus.Logger
 	logOutput             io.Writer
+	requestMu             sync.Mutex
 
 	// maxIdleConns controls the maximum number of idle (keep-alive)
 	// connections across all hosts. Zero means no limit.
@@ -178,6 +180,10 @@ func (a *ApiClient) AddDefaultHeader(headerName string, headerValue string) {
 func (a *ApiClient) CallApi(uri *string, httpMethod string, body interface{},
 	queryParams url.Values, headerParams map[string]string, formParams url.Values,
 	accepts []string, contentType []string, authNames []string) (interface{}, error) {
+	// The generated request path mutates shared authentication and transport state.
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
+
 	path := a.Scheme + "://" + a.Host + ":" + strconv.Itoa(a.Port) + *uri
 
 	if headerParams["Authorization"] != "" {
