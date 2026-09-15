@@ -1,4 +1,4 @@
-//The api client for dataprotection's golang SDK
+// The api client for dataprotection's golang SDK
 package client
 
 import (
@@ -25,6 +25,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -45,24 +46,24 @@ var (
 )
 
 /*
-  API client to handle the client-server communication, and is invariant across implementations.
+API client to handle the client-server communication, and is invariant across implementations.
 
-    Scheme (optional) : URI scheme for connecting to the cluster (HTTP or HTTPS using SSL/TLS) (default : https)
-    Host (required) : Host IPV4, IPV6 or FQDN for all http request made by this client (default : localhost)
-    Port (optional) : Port for the host to connect to make all http request (default : 9440)
-    Username (required) : Username to connect to a cluster
-    Password (required) : Password to connect to a cluster
-    Debug (optional) : flag to enable debug logging (default : empty)
-    VerifySSL (optional) : Verify SSL certificate of cluster (default: true)
-    MaxRetryAttempts (optional) : Maximum number of retry attempts to be made at a time (default: 5)
-    MaxRedirects (optional) : Maximum number of redirect attempts to be made at a time (default: 10)
-    ReadTimeout (optional) : Read timeout for all operations (default: 30 sec)
-    ConnectTimeout (optional) : Connection timeout for all operations (default: 30 sec)
-    RetryInterval (optional) : Interval between successive retry attempts (default: 3 sec)
-    DownloadDirectory (optional) : Directory location on local for files to download (default: Current Directory)
-    DownloadChunkSize (optional) : Chunk size in bytes for files to download (default: 8*1024 bytes)
-    LoggerFile (optional) : Log file to write activity logs
-    AllowVersionNegotiation (optional) : Flag to enable version negotiation
+	Scheme (optional) : URI scheme for connecting to the cluster (HTTP or HTTPS using SSL/TLS) (default : https)
+	Host (required) : Host IPV4, IPV6 or FQDN for all http request made by this client (default : localhost)
+	Port (optional) : Port for the host to connect to make all http request (default : 9440)
+	Username (required) : Username to connect to a cluster
+	Password (required) : Password to connect to a cluster
+	Debug (optional) : flag to enable debug logging (default : empty)
+	VerifySSL (optional) : Verify SSL certificate of cluster (default: true)
+	MaxRetryAttempts (optional) : Maximum number of retry attempts to be made at a time (default: 5)
+	MaxRedirects (optional) : Maximum number of redirect attempts to be made at a time (default: 10)
+	ReadTimeout (optional) : Read timeout for all operations (default: 30 sec)
+	ConnectTimeout (optional) : Connection timeout for all operations (default: 30 sec)
+	RetryInterval (optional) : Interval between successive retry attempts (default: 3 sec)
+	DownloadDirectory (optional) : Directory location on local for files to download (default: Current Directory)
+	DownloadChunkSize (optional) : Chunk size in bytes for files to download (default: 8*1024 bytes)
+	LoggerFile (optional) : Log file to write activity logs
+	AllowVersionNegotiation (optional) : Flag to enable version negotiation
 */
 type ApiClient struct {
 	Scheme                  string `json:"scheme,omitempty"`
@@ -94,6 +95,8 @@ type ApiClient struct {
 	previousAuth            string
 	basicAuth               *BasicAuth
 	logger                  *logrus.Logger
+	logOutput               io.Writer
+	requestMu               sync.Mutex
 
 	// maxIdleConns controls the maximum number of idle (keep-alive)
 	// connections across all hosts. Zero means no limit.
@@ -196,8 +199,12 @@ func (a *ApiClient) CallApi(uri *string, httpMethod string, body interface{},
 func (a *ApiClient) CallApiWithContext(ctx context.Context, uri *string, httpMethod string, body interface{},
 	queryParams url.Values, headerParams map[string]string, formParams url.Values,
 	accepts []string, contentType []string, authNames []string) (interface{}, error) {
+	// The generated request path mutates shared authentication and transport state.
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
+
 	if a.AllowVersionNegotiation && !a.negotiationCompleted {
-		a.NegotiateVersion(authNames)
+		a.negotiateVersion(authNames)
 	}
 	return a.callApiInternal(ctx, uri, httpMethod, body, queryParams, headerParams,
 		formParams, accepts, contentType, authNames)
@@ -358,6 +365,19 @@ func (a *ApiClient) callApiInternal(ctx context.Context, uri *string, httpMethod
 		return &EmptyResponse{}, nil
 	}
 
+	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
+		responseBody, readErr := io.ReadAll(response.Body)
+		response.Body.Close()
+		if readErr != nil {
+			a.logger.Error(readErr.Error())
+			return nil, readErr
+		}
+		return nil, GenericOpenAPIError{
+			Body:   responseBody,
+			Status: response.Status,
+		}
+	}
+
 	if isBinaryResponse || isTextResponse {
 		return response, nil
 	}
@@ -370,15 +390,8 @@ func (a *ApiClient) callApiInternal(ctx context.Context, uri *string, httpMethod
 	response.Body.Close()
 	response.Body = io.NopCloser(bytes.NewBuffer(responseBody))
 
-	if !(200 <= response.StatusCode && response.StatusCode <= 209) {
-		return nil, GenericOpenAPIError{
-			Body:   responseBody,
-			Status: response.Status,
-		}
-	} else {
-		responseBody := addEtagReferenceToResponse(response.Header, responseBody)
-		return responseBody, nil
-	}
+	responseBody = addEtagReferenceToResponse(response.Header, responseBody)
+	return responseBody, nil
 }
 
 func (a *ApiClient) Contains(source []string, match string) bool {
@@ -439,6 +452,14 @@ func (a *ApiClient) GetAuthentication(authName string) interface{} {
 // Get fallback version negotiated with server
 func (a *ApiClient) GetNegotiatedVersion() string {
 	return a.negotiatedVersion
+}
+
+// SetLogOutput redirects SDK logs to output. Passing nil restores the default
+// stderr and LoggerFile behavior. Call this method before using the client
+// concurrently.
+func (a *ApiClient) SetLogOutput(output io.Writer) {
+	a.logOutput = output
+	configureLogger(a)
 }
 
 // Helper method to set username for the first HTTP basic authentication.
@@ -701,7 +722,9 @@ func configureLogger(a *ApiClient) {
 	}
 
 	var output io.Writer
-	if a.LoggerFile == "" {
+	if a.logOutput != nil {
+		output = a.logOutput
+	} else if a.LoggerFile == "" {
 		output = os.Stderr
 	} else {
 		f, _ := os.OpenFile(a.LoggerFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0777)
@@ -1008,6 +1031,12 @@ func (a *ApiClient) getVersionDetails(version string) map[string]string {
 
 // Trigger OPTIONS API call and version negotiation manually
 func (a *ApiClient) NegotiateVersion(authNames []string) {
+	a.requestMu.Lock()
+	defer a.requestMu.Unlock()
+	a.negotiateVersion(authNames)
+}
+
+func (a *ApiClient) negotiateVersion(authNames []string) {
 	path := new(string)
 	*path = "/api/dataprotection/unversioned/info"
 	response, err := a.callApiInternal(context.Background(), path, http.MethodOptions, nil, url.Values{}, make(map[string]string),
@@ -1019,8 +1048,19 @@ func (a *ApiClient) NegotiateVersion(authNames []string) {
 			a.negotiationCompleted = false
 			return
 		}
+		responseBody, ok := response.([]byte)
+		if !ok {
+			if httpResponse, isHTTPResponse := response.(*http.Response); isHTTPResponse {
+				a.logger.Errorf("Could not fetch supported versions from server: received %s", httpResponse.Status)
+			} else {
+				a.logger.Errorf("Could not fetch supported versions from server: received unexpected response type %T", response)
+			}
+			a.negotiatedVersion = ""
+			a.negotiationCompleted = true
+			return
+		}
 		unmarshalledResp := make(map[string]interface{})
-		err = json.Unmarshal(response.([]byte), &unmarshalledResp)
+		err = json.Unmarshal(responseBody, &unmarshalledResp)
 		if nil == err {
 			if data, ok1 := unmarshalledResp["data"].(string); ok1 {
 				minimumSupportedVersion := "v4.2"
@@ -1050,7 +1090,7 @@ func (a *ApiClient) NegotiateVersion(authNames []string) {
 	} else {
 		a.logger.Errorf("Could not fetch supported versions from server with error : %s", err)
 		a.negotiatedVersion = ""
-		a.negotiationCompleted = false
+		a.negotiationCompleted = true
 	}
 }
 
@@ -1237,13 +1277,13 @@ type BasicAuth struct {
 }
 
 /*
-  Configuration for the Proxy Server that requests are to be routed through.
+Configuration for the Proxy Server that requests are to be routed through.
 
-    Scheme: URI Scheme for connecting to the proxy ("http", "https" or "socks5")
-    Host: Host of the proxy to which the client will connect to
-    Port: Port of the proxy to which the client will connect to
-    Username: Username to connect to the proxy
-    Password: Password to connect to the proxy
+	Scheme: URI Scheme for connecting to the proxy ("http", "https" or "socks5")
+	Host: Host of the proxy to which the client will connect to
+	Port: Port of the proxy to which the client will connect to
+	Username: Username to connect to the proxy
+	Password: Password to connect to the proxy
 */
 type Proxy struct {
 	Username string `json:"username,omitempty"`
